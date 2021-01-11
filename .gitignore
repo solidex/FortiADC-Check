@@ -1,0 +1,7 @@
+logs/
+vars/
+*.retry
+*.pyc
+__pycache__
+utils/
+library/ntc-templates

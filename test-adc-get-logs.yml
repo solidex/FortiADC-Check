@@ -1,0 +1,58 @@
+
+- hosts: localhost
+
+  gather_facts: no
+  vars:
+    waf_inconsistency: []
+    attacks_detected_count: 0
+    attacks_in_logs_count: 0
+    ha_master_map: {}
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortiadcmonitor:
+      action: "system ha status"
+      host:  "{{ hostvars[item]['host'] }}"
+      username: "{{ hostvars[item]['username'] }}"
+      password: "{{ hostvars[item]['password'] }}"
+    register: system_ha_info
+    with_items: "{{ groups['adc'] }}"
+
+
+  # build a dict: master device by group name
+  - set_fact:
+      ha_master_map: "{{ ha_master_map | combine( { item.item.split('-')[1].split('.')[0] : item.item } ) }}"
+    when: "item['meta']['output']['payload']['local_state'] == 'Primary'"
+    with_items: "{{ system_ha_info.results }}"
+
+  # - debug:
+  #     msg: "{{ ha_master_map }}"
+
+  - name: Get my public IP
+    run_once: true
+    community.general.ipify_facts:
+
+  - set_fact:
+      date: "{{ lookup('pipe','date +\"%Y-%m-%d\"') }}"
+      time_from: "{{ lookup('pipe','date +\"%H:%M:%S\"') }}"
+      time_to: "{{ lookup('pipe','date +\"%H:%M:%S\" -d \"+5 minute\"') }}"
+
+  # check existing logs
+  - name: Get logs
+    fortiadcmonitor:
+     action: "logs"
+     log_search_filter: |
+            [{"property":"src","operator":"equals","value":{"exclude":"0","val1":"{{ ipify_public_ip }}"}}]
+     log_type: "attack"
+     log_subtype: "waf"
+     host:  "{{ hostvars[item]['host'] }}"
+     username: "{{ hostvars[item]['username'] }}"
+     password: "{{ hostvars[item]['password'] }}"
+     vdom: "{{ hostvars[item]['vdom'] }}"
+    register: log_info
+    with_items: "{{ groups['adc'] }}"
+
+  - set_fact:
+      attacks_in_logs_count: "{{ attacks_in_logs_count | int + item.meta.output.data.payload | length  }}"
+    loop: "{{ log_info.results }}"

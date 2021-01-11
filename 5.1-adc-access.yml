@@ -1,0 +1,43 @@
+
+- hosts: adc
+
+  gather_facts: no
+  vars:
+    acc_inconsistency: []
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortiadcmonitor:
+     action: "system ha status"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+    register: system_ha_info
+
+  - set_fact:
+      is_ha_master: "{{ system_ha_info['meta']['output']['payload']['local_state'] == 'Primary' }}"
+
+  - name: "Scanning ports from this host"
+    delegate_to: localhost
+    shell: nmap {{ ip[item].address | ipaddr('address') }} -p22,23,80,443,541 --open | grep open
+    register: acc_status
+    when: is_ha_master
+    with_items: "{{ ip }}"
+    changed_when: no
+    failed_when: no
+
+  - name: "Check if scan found no open ports"
+    set_fact:
+      acc_inconsistency: "{{ acc_inconsistency + [ inventory_hostname + ': ' + item.item + ' from LOCALHOST check failed: ' + item.stdout ]}}"
+    when:
+      - 'item.stdout != ""'
+      - is_ha_master
+    loop: "{{ acc_status.results }}"
+
+  # Printing results
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'Access ok' if (acc_inconsistency | length) == 0 else acc_inconsistency}}"
+    when:
+      - is_ha_master

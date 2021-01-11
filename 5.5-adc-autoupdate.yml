@@ -1,0 +1,48 @@
+
+- hosts: adc
+  vars:
+    autoupd_inconsistency: []
+  gather_facts: no
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortiadcmonitor:
+     action: "system ha status"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+    register: system_ha_info
+
+  - set_fact:
+      is_ha_master: "{{ system_ha_info['meta']['output']['payload']['local_state'] == 'Primary' }}"
+
+  - name: Get fdn availablity info
+    delegate_to: localhost
+    fortiadcmonitor:
+      host:  "{{ host }}"
+      username: "{{ username }}"
+      password: "{{ password }}"
+      method: "ssh"
+      commands: "diagnose autoupdate status"
+    register: fdn_avail_status
+    when: is_ha_master
+
+  - name: "Check fdn is available"
+    set_fact:
+      autoupd_inconsistency: "{{ autoupd_inconsistency + [ inventory_hostname + ': FDN is not available' ] }}"
+    when:
+      - "'FDN availability:  available' not in fdn_avail_status.meta.out | default('')"
+      - is_ha_master
+
+  - name: "Check autoupdate schedule"
+    set_fact:
+      autoupd_inconsistency: "{{ autoupd_inconsistency + [ inventory_hostname + ': update not scheduled' ] }}"
+    when:
+      - "'Scheduled update: enable' not in fdn_avail_status.meta.out | default('')"
+      - is_ha_master
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'Autoupdate ok' if (autoupd_inconsistency | length) == 0 else autoupd_inconsistency}}"
+    when: is_ha_master

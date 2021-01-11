@@ -1,0 +1,106 @@
+
+- hosts: utm
+
+  gather_facts: no
+  vars:
+    ping_inconsistency: []
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortios_facts:
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     gather_subset:
+        - fact: 'system_ha-checksums_select'
+    register: fortios_ha_info
+
+  - set_fact:
+      is_ha_master: "{{ ( ansible_facts.network_resources['system_ha-checksums_select'] | json_query('results[?is_manage_master==`1`].serial_no | [0]') ) == ansible_facts.network_resources['system_ha-checksums_select']['serial'] }}"
+
+  - name: "Ping - BGP neighbors"
+    delegate_to: localhost
+    fortiosconfig:
+     action: "ssh"
+     host:  "{{  host }}"
+     username: "{{  username }}"
+     password: "{{ password }}"
+     https: True
+     commands: |
+               {% if vdom_mode %}
+               config vdom
+               edit {{ vdom }}
+               {% endif %}
+               execute ping {{ item.ip }}
+
+    register: ping_result_bgp
+    loop: "{{ bgp.neighbor }}"
+    when: is_ha_master
+
+  - name: "Check if pings where ok - BGP neigh"
+    set_fact:
+      ping_inconsistency: "{{ ping_inconsistency + [ inventory_hostname + ': packet loss pinging BGP neighbor ' + item.item.ip ]}}"
+    when:
+      - '" 0% packet loss" not in item.meta.out'
+      - is_ha_master
+    loop: "{{ ping_result_bgp.results }}"
+
+  - name: "Ping: Subscriber side"
+    delegate_to: localhost
+    fortiosconfig:
+     action: "ssh"
+     host:  "{{  host }}"
+     username: "{{  username }}"
+     password: "{{ password }}"
+     https: True
+     vdom: "{{ vdom }}"
+     commands: |
+               {% if vdom_mode %}
+               config vdom
+               edit {{ vdom }}
+               {% endif %}
+               execute ping {{ item.ip }}
+    register: ping_result_left
+    loop: "{{ connectivity.client }}"
+    when: is_ha_master
+
+  - name: "Ping: Internet side"
+    delegate_to: localhost
+    fortiosconfig:
+     action: "ssh"
+     host:  "{{  host }}"
+     username: "{{  username }}"
+     password: "{{ password }}"
+     https: True
+     vdom: "{{ vdom }}"
+     commands: |
+               {% if vdom_mode %}
+               config vdom
+               edit {{ vdom }}
+               {% endif %}
+               execute ping {{ item.ip }}
+    register: ping_result_right
+    loop: "{{ connectivity.internet }}"
+    when: is_ha_master
+
+  - name: "Check if pings where ok 1"
+    set_fact:
+      ping_inconsistency: "{{ ping_inconsistency + [ inventory_hostname + ': packet loss pinging ' + item.item.ip ]}}"
+    when:
+      - '" 0% packet loss" not in item.meta.out'
+      - is_ha_master
+    loop: "{{ ping_result_left.results }}"
+
+  - name: "Check if pings where ok 2"
+    set_fact:
+      ping_inconsistency: "{{ ping_inconsistency + [ inventory_hostname + ': packet loss pinging ' + item.item.ip ]}}"
+    when:
+      - '" 0% packet loss" not in item.meta.out'
+      - is_ha_master
+    loop: "{{ ping_result_right.results }}"
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'Connectivity ok' if (ping_inconsistency | length) == 0 else ping_inconsistency}}"
+    when: is_ha_master

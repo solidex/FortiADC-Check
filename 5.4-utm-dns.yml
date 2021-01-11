@@ -1,0 +1,75 @@
+
+- hosts: utm
+
+  gather_facts: no
+  vars:
+    dns_inconsistency: []
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortios_facts:
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     gather_subset:
+        - fact: 'system_ha-checksums_select'
+    register: fortios_ha_info
+
+  - set_fact:
+      is_ha_master: "{{ ( ansible_facts.network_resources['system_ha-checksums_select'] | json_query('results[?is_manage_master==`1`].serial_no | [0]') ) == ansible_facts.network_resources['system_ha-checksums_select']['serial'] }}"
+
+  - name: "Get DNS config"
+    delegate_to: localhost
+    fortiosconfig:
+     config: "system dns"
+     action: "get"
+     host:  "{{  host }}"
+     username: "{{  username }}"
+     password: "{{ password }}"
+     https: True
+     ssl_verify: False
+    register: dns_info
+    when: is_ha_master
+
+  - name: "Check DNS config"
+    set_fact:
+      dns_inconsistency: "{{ dns_inconsistency + [ inventory_hostname + ': DNS servers are not configured properly! Configured servers: ' + dns_info.meta.results.primary + ',' + dns_info.meta.results.secondary + ' expected: ' + item ]}}"
+    when:
+      - 'dns_info.meta.results.primary != item and dns_info.meta.results.secondary != item'
+      - is_ha_master
+    with_items: "{{ dns }}"
+
+  - name: "Clear DNS cache and ping FQDN"
+    delegate_to: localhost
+    fortiosconfig:
+      action: "ssh"
+      host:  "{{  host }}"
+      username: "{{ username }}"
+      password: "{{ password }}"
+      https: True
+      commands: |
+             {% if vdom_mode %}
+             config global
+             {% endif %}
+             diag test application dnsproxy 14
+             {% if vdom_mode %}
+             end
+             config vdom
+             edit {{ mgmt_vdom }}
+             {% endif %}
+             exec ping update.fortiguard.net
+    register: ping_result
+    when: is_ha_master
+
+  - name: "Check if pings where ok"
+    set_fact:
+      dns_inconsistency: "{{ dns_inconsistency + [ inventory_hostname + ': packet loss pinging ' + item.item.ip ]}}"
+    when:
+      - '" 0% packet loss" not in ping_result.meta.out'
+      - is_ha_master
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'DNS ok' if (dns_inconsistency | length) == 0 else dns_inconsistency }}"
+    when: is_ha_master

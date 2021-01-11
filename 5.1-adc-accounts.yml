@@ -1,0 +1,54 @@
+
+- hosts: adc
+
+  gather_facts: no
+  vars:
+    acc_inconsistency: []
+  vars_prompt:
+    - name: username2
+      prompt: "username"
+      private: no
+
+    - name: password2
+      prompt: "password"
+
+    - name: valid
+      prompt: are entered credentials valid (yes/no)
+      private: no
+
+  tasks:
+
+  - name: Test SSH
+    delegate_to: localhost
+    fortiadcmonitor:
+      host:  "{{ host }}"
+      username: "{{ username2 }}"
+      password: "{{ password2 }}"
+      method: "ssh"
+      commands: "get system status"
+    register: ssh_1
+    ignore_errors: yes
+
+  - name: Test HTTPS
+    delegate_to: localhost
+    fortiadcmonitor:
+      action: "platform info"
+      host:  "{{ host }}"
+      username: "{{ username2 }}"
+      password: "{{ password2 }}"
+    register: https_1
+    ignore_errors: yes
+
+  - name: "Check admin access was ok - 1.1"
+    set_fact:
+      acc_inconsistency: "{{ acc_inconsistency + [ inventory_hostname + ': admin access via SSH NOT ok!' ] }}"
+    when: "(ssh_1.failed and valid | bool) or (not ssh_1.failed and not valid | bool)"
+
+  - name: "Check admin access was ok - 1.2"
+    set_fact:
+      acc_inconsistency: "{{ acc_inconsistency + [ inventory_hostname + ': admin access via HTTPS NOT ok!' ] }}"
+    when: "(https_1.failed and valid | bool) or (not https_1.failed and not valid | bool)"
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'Accounts ok' if (acc_inconsistency | length) == 0 else acc_inconsistency}}"

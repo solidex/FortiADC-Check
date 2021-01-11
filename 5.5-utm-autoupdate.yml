@@ -1,0 +1,60 @@
+
+- hosts: utm
+  vars:
+    autoupd_inconsistency: []
+  gather_facts: no
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortios_facts:
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     gather_subset:
+        - fact: 'system_ha-checksums_select'
+    register: fortios_ha_info
+
+  - set_fact:
+      is_ha_master: "{{ ( ansible_facts.network_resources['system_ha-checksums_select'] | json_query('results[?is_manage_master==`1`].serial_no | [0]') ) == ansible_facts.network_resources['system_ha-checksums_select']['serial'] }}"
+
+  - name: Get fdn availablity info
+    delegate_to: localhost
+    fortiosconfig:
+     action: "ssh"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     commands: |
+               {% if vdom_mode %}
+               config global
+               {% endif %}
+               diagnose autoupdate status
+    register: fdn_avail_status
+    when: is_ha_master
+
+  - name: "Check fdn is available"
+    set_fact:
+      autoupd_inconsistency: "{{ autoupd_inconsistency + [ inventory_hostname + ': FDN is not available' ] }}"
+    when:
+      - "'FDN availability:  available' not in fdn_avail_status.meta.out"
+      - is_ha_master
+
+  - name: "Check AV autoupdates"
+    set_fact:
+      autoupd_inconsistency: "{{ autoupd_inconsistency + [ inventory_hostname + ': AV update not scheduled' ] }}"
+    when:
+      - "'Virus definitions update: enable' not in fdn_avail_status.meta.out"
+      - is_ha_master
+
+  - name: "Check IPS autoupdates"
+    set_fact:
+      autoupd_inconsistency: "{{ autoupd_inconsistency + [ inventory_hostname + ': IPS update not scheduled' ] }}"
+    when:
+      - "'IPS definitions update: enable' not in fdn_avail_status.meta.out"
+      - is_ha_master
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'Autoupdate ok' if (autoupd_inconsistency | length) == 0 else autoupd_inconsistency}}"
+    when: is_ha_master

@@ -1,0 +1,72 @@
+
+- hosts: utm
+
+  gather_facts: no
+  vars:
+    bgp_inconsistency: []
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortios_facts:
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     gather_subset:
+        - fact: 'system_ha-checksums_select'
+    register: fortios_ha_info
+
+  - set_fact:
+      is_ha_master: "{{ ( ansible_facts.network_resources['system_ha-checksums_select'] | json_query('results[?is_manage_master==`1`].serial_no | [0]') ) == ansible_facts.network_resources['system_ha-checksums_select']['serial'] }}"
+
+  - name: "Get BGP summary"
+    delegate_to: localhost
+    fortiosconfig:
+     action: "ssh"
+     host:  "{{  host }}"
+     username: "{{  username }}"
+     password: "{{ password }}"
+     https: True
+     commands: |
+               {% if vdom_mode %}
+               config vdom
+               edit {{ vdom }}
+               {% endif %}
+               get router info bgp summary
+    register: result_bgp_info
+    when: is_ha_master
+
+  # - debug:
+  #    msg: "{{ result_bgp_info.meta.out | replace('\\n', '\n') | replace('\\r', '\r') }}"
+
+  - name: "Run command and parse with ntc_templates"
+    ansible.netcommon.cli_parse:
+      text: "{{ result_bgp_info.meta.out | replace('\\n', '\n') | replace('\\r', '\r')  }}"
+      parser:
+        name: ansible.netcommon.textfsm
+        template_path: "./templates/fortios/vdom/bgp_neighbors-6.4"
+      set_fact: bgp_parsed
+    when: is_ha_master
+
+  # - debug:
+  #    msg: "{{ bgp_parsed }}"
+
+  - name: "Check BGP neighbors number"
+    set_fact:
+      bgp_inconsistency: "{{ bgp_inconsistency + [ inventory_hostname + ': has ' + bgp_parsed | length | string + ' neighbors, but ' + bgp.neighbor | length | string + ' expected'] }}"
+    when:
+      - 'bgp_parsed | default([]) | length != bgp.neighbor | length'
+      - is_ha_master
+
+  - name: "Check if BGP neighbors running"
+    set_fact:
+      bgp_inconsistency: "{{ bgp_inconsistency + [ inventory_hostname + ': bgp neighbor ' + item.BGP_NEIGH + ' is not running']}}"
+    when:
+      - 'not (item.STATE_PFXRCD | int(-1) >= 0)'
+      - is_ha_master
+    with_items: "{{ bgp_parsed | default([]) }}"
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'BGP ok' if (bgp_inconsistency | length) == 0 else bgp_inconsistency}}"
+    when: is_ha_master

@@ -1,0 +1,88 @@
+
+- hosts: adc
+
+  gather_facts: no
+  vars:
+    ping_inconsistency: []
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortiadcmonitor:
+     action: "system ha status"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+    register: system_ha_info
+
+  - debug:
+      msg: "{{ system_ha_info['meta']['output']['payload']['local_state'] }}"
+
+  - name: Get HA status - 1st unit
+    delegate_to: localhost
+    fortiadcmonitor:
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     vdom: "data"
+     method: "ssh"
+     commands: "exec ping {{ item.ip }}"
+
+    register: ping_bgp_result
+    loop: "{{ bgp.neighbor }}"
+    when: "system_ha_info['meta']['output']['payload']['local_state'] == 'Primary'"
+
+  - name: "Check if pings where ok - BGP neigh"
+    set_fact:
+      ping_inconsistency: "{{ ping_inconsistency + [ inventory_hostname + ': packet loss pinging ' + item.item.ip ]}}"
+    when:
+      - '" 0% packet loss" not in item.meta.out | default([])'
+      - "system_ha_info['meta']['output']['payload']['local_state'] == 'Primary'"
+    loop: "{{ ping_bgp_result.results }}"
+
+  - name: "Ping: Client side"
+    delegate_to: localhost
+    fortiadcmonitor:
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     vdom: "data"
+     method: "ssh"
+     commands: "exec ping {{ item.ip }}"
+    register: ping_client_result
+    loop: "{{ connectivity.client }}"
+    when: "system_ha_info['meta']['output']['payload']['local_state'] == 'Primary'"
+
+  - name: "Ping: Internet side"
+    delegate_to: localhost
+    fortiadcmonitor:
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     vdom: "data"
+     method: "ssh"
+     commands: "exec ping {{ item.ip }}"
+    register: ping_internet_result
+    loop: "{{ connectivity.internet }}"
+    when: "system_ha_info['meta']['output']['payload']['local_state'] == 'Primary'"
+
+  - name: "Check if pings where ok - Client side"
+    set_fact:
+      ping_inconsistency: "{{ ping_inconsistency + [ inventory_hostname + ': packet loss pinging ' + item.item.ip ]}}"
+    when:
+      - '" 0% packet loss" not in item.meta.out | default([])'
+      - "system_ha_info['meta']['output']['payload']['local_state'] == 'Primary'"
+    loop: "{{ ping_client_result.results }}"
+
+  - name: "Check if pings where ok - Internet side"
+    set_fact:
+      ping_inconsistency: "{{ ping_inconsistency + [ inventory_hostname + ': packet loss pinging ' + item.item.ip ]}}"
+    when:
+      - '" 0% packet loss" not in item.meta.out | default([])'
+      - "system_ha_info['meta']['output']['payload']['local_state'] == 'Primary'"
+    loop: "{{ ping_internet_result.results }}"
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'Connectivity ok' if (ping_inconsistency | length) == 0 else ping_inconsistency}}"
+    when: "system_ha_info['meta']['output']['payload']['local_state'] == 'Primary'"

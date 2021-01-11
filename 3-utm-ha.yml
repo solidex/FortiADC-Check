@@ -1,0 +1,53 @@
+
+- hosts: ha_unit_1, utm
+
+  gather_facts: no
+  vars:
+    ha_inconsistency: []
+  tasks:
+
+  - name: Get HA status - Overall
+    delegate_to: localhost
+    fortiosconfig:
+     action: "ssh"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     commands: |
+               get system ha status
+    register: system_ha_info
+
+  - set_fact:
+      fg_master_sn: "{{ system_ha_info.meta.out | regex_findall ('Master: (FG\\w+),') }}"
+      fg_slave_sn: "{{ system_ha_info.meta.out | regex_findall ('Slave : (FG\\w+),') }}"
+    ignore_errors: yes
+
+  - name: Get HA status - Sync
+    delegate_to: localhost
+    fortiosconfig:
+     action: "ssh"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     commands: |
+               get system ha status | grep -A3 "Configuration Status:"
+    register: system_ha_sync_info
+
+  - set_fact:
+      fg_master_sync: "{{ (system_ha_sync_info.meta.out | regex_findall(fg_master_sn[0] + '.*: ([\\w-]+)'))[0] }}"
+      fg_slave_sync: "{{ (system_ha_sync_info.meta.out | regex_findall(fg_slave_sn[0] + '.*: ([\\w-]+)'))[0] }}"
+    ignore_errors: yes
+
+  - name: "Check HA master/slave are there"
+    set_fact:
+      ha_inconsistency: "{{ ha_inconsistency + [ inventory_hostname + ': Master or Slave missing, M ' + fg_master_sn + ', S ' + fg_slave_sn ]}}"
+    when: "fg_master_sn | default('N/A') == '' or fg_slave_sn | default('N/A') =='' "
+
+  - name: "Check HA is in-sync"
+    set_fact:
+      ha_inconsistency: "{{ ha_inconsistency + [ inventory_hostname + ': Sync check failed, M ' + fg_master_sync | default('N/A') + ', S ' + fg_slave_sync | default('N/A') ]}}"
+    when: "fg_master_sync | default('not-in-sync') != 'in-sync' or fg_slave_sync | default('not-in-sync') != 'in-sync' "
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'HA ok' if (ha_inconsistency | length) == 0 else ha_inconsistency }}"

@@ -1,0 +1,59 @@
+
+- hosts: utm
+
+  gather_facts: no
+  vars:
+    acc_inconsistency: []
+  vars_prompt:
+    - name: username2
+      prompt: "username"
+      private: no
+
+    - name: password2
+      prompt: "password"
+
+    - name: valid
+      prompt: are entered credentials valid (yes/no)
+      private: no
+
+  tasks:
+
+  - name: Test SSH - 1
+    delegate_to: localhost
+    fortiosconfig:
+     action: "ssh"
+     host:  "{{ host }}"
+     username: "{{ username2  }}"
+     password: "{{ password2 }}"
+     commands: |
+               get system status
+    register: ssh_1
+    ignore_errors: yes
+
+  - name: Test HTTPS - 1
+    delegate_to: localhost
+    fortiosconfig:
+      config: "system firmware"
+      action: "monitor"
+      host:  "{{ host }}"
+      username: "{{ username2  }}"
+      password: "{{ password2 }}"
+      https: "{{ https }}"
+      ssl_verify: False
+    register: https_1
+    ignore_errors: yes
+
+  - name: "Check admin access was ok - 1.1"
+    set_fact:
+      acc_inconsistency: "{{ acc_inconsistency + [ inventory_hostname + ': admin access via SSH NOT ok!' ] }}"
+    when: "(ssh_1.failed and valid | bool) or (not ssh_1.failed and not valid | bool)"
+
+
+  - name: "Check admin access was ok - 1.2"
+    set_fact:
+      acc_inconsistency: "{{ acc_inconsistency + [ inventory_hostname + ': admin access via HTTPS NOT ok!' ] }}"
+    when: "(https_1.failed and valid | bool) or (not https_1.failed and not valid | bool)"
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'Accounts ok' if (acc_inconsistency | length) == 0 else acc_inconsistency}}"

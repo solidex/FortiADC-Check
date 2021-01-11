@@ -1,0 +1,49 @@
+
+- hosts: adc
+
+  gather_facts: no
+  vars:
+    ntp_inconsistency: []
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortiadcmonitor:
+     action: "system ha status"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+    register: system_ha_info
+
+  - set_fact:
+      is_ha_master: "{{ system_ha_info['meta']['output']['payload']['local_state'] == 'Primary' }}"
+
+  - name: Get platform info
+    delegate_to: localhost
+    fortiadcmonitor:
+     action: "platform info"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     vdom: "{{ vdom }}"
+    register: platform_info
+    when: is_ha_master
+
+  - set_fact:
+      now: "{{  (lookup('pipe','date +\"%Y-%m-%d %H:%M:%S\"') | to_datetime()).strftime('%s') }}"
+
+  - set_fact:
+      systemTime: "{{ (platform_info.meta.output.payload.systemTime | to_datetime(\"%a %b %d %H:%M:%S %Y\")).strftime('%s') }}" # Thu Jan  7 23:03:05 2021
+    when: is_ha_master
+
+  - name: "Check if time in sync"
+    set_fact:
+      ntp_inconsistency: "{{ ntp_inconsistency + [ inventory_hostname + ': time not in sync: now ' + now + ' but systemTime ' + systemTime ]}}"
+    when:
+      - "(now|int - systemTime|default(0)|int)|abs > 10"
+      - is_ha_master
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'NTP ok' if (ntp_inconsistency | length) == 0 else ntp_inconsistency}}"
+    when: is_ha_master

@@ -1,0 +1,163 @@
+
+- hosts: localhost
+
+  gather_facts: no
+  vars:
+    reputation_inconsistency: []
+    attacks_detected_count: 0
+    attacks_in_logs_count: 0
+    ha_master_map: {}
+    is_ha_master: []
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortiadcmonitor:
+      action: "system ha status"
+      host:  "{{ hostvars[item]['host'] }}"
+      username: "{{ hostvars[item]['username'] }}"
+      password: "{{ hostvars[item]['password'] }}"
+    register: system_ha_info
+    with_items: "{{ groups['adc'] }}"
+
+
+  # build a dict: master device by group name
+  - set_fact:
+      ha_master_map: "{{ ha_master_map | combine( { item.item.split('-')[1].split('.')[0] : item.item } ) }}"
+    when: "item['meta']['output']['payload']['local_state'] == 'Primary'"
+    with_items: "{{ system_ha_info.results }}"
+
+  - set_fact:
+      is_ha_master: "{{ is_ha_master | combine( { item.item:  item['meta']['output']['payload']['local_state'] == 'Primary' } ) }}"
+    with_items: "{{ system_ha_info.results }}"
+
+  # - debug:
+  #     msg: "{{ is_ha_master }}"
+
+  - name: Get my public IP
+    run_once: true
+    community.general.ipify_facts:
+
+  - set_fact:
+      date: "{{ lookup('pipe','date +\"%Y-%m-%d\"') }}"
+      time_from: "{{ lookup('pipe','date +\"%H:%M:%S\"') }}"
+      time_to: "{{ lookup('pipe','date +\"%H:%M:%S\" -d \"+5 minute\"') }}"
+
+  # check existing logs
+  - name: Get logs
+    fortiadcmonitor:
+     action: "logs"
+     log_search_filter: |
+            [{"property":"src","operator":"equals","value":{"exclude":"0","val1":"{{ ipify_public_ip }}"}},
+             {"property":"date","operator":"between","value":{"exclude":"0","val1":"{{ date }}","val2":"{{ date }}"}},
+             {"property":"time","operator":"between","value":{"exclude":"0","val1":"{{ time_from }}","val2":"{{ time_to }}"}}
+            ]
+     log_type: "attack"
+     log_subtype: "ip_reputation"
+     host:  "{{ hostvars[item]['host'] }}"
+     username: "{{ hostvars[item]['username'] }}"
+     password: "{{ hostvars[item]['password'] }}"
+     vdom: "{{ hostvars[item]['vdom'] }}"
+    register: log_info
+    with_items: "{{ groups['adc'] }}"
+
+  - name: "Adding {{ ipify_public_ip }} to blacklist"
+    shell: "python module_utils/add_entry_to_iprep_blacklist.py {{ hostvars[item].host }} {{ hostvars[item].vdom }} {{ hostvars[item].username }} \"{{ hostvars[item].password }}\" {{ ipify_public_ip }}/32"
+    args:
+      chdir: "{{ playbook_dir }}"
+    when: "is_ha_master[item]"
+    with_items: "{{ groups['adc'] }}"
+    register: attack_result
+    ignore_errors: yes
+
+  - set_fact:
+      attacks_in_logs_count: "{{ attacks_in_logs_count | int + item.meta.output.data.payload | length  }}"
+    loop: "{{ log_info.results }}"
+
+  - debug:
+      msg: "Events in logs: {{ attacks_in_logs_count }}"
+
+  - fail:
+      msg: "There are some logs for src IP {{ ipify_public_ip }}. Results will be inaccurate. Please try in a minute."
+    when: attacks_in_logs_count | int > 0
+
+  - set_fact:
+      targets_attacks: "{{ (vs.l7_http + vs.l4) | product(tests.ip_reputation) | list }}"
+      attacks_planned_count: "{{ (vs.l7_http + vs.l4) | product(tests.ip_reputation) | list | length  }}"
+
+  # - debug:
+  #     msg: "{{ targets_attacks }}"
+
+  - debug:
+      msg: "{{ attacks_planned_count }} attacks planned! My public IP: {{ ipify_public_ip }}"
+
+  - name: "Running attacks..."
+    get_url:
+      url: "http://{{ item.0.ip }}:{{ item.0.port }}/"
+      dest: /tmp/
+      timeout: 3
+    loop: "{{ targets_attacks}}"
+    register: attack_result
+    ignore_errors: yes
+
+  - name: "Removing {{ ipify_public_ip }} from blacklist"
+    shell: "python module_utils/del_entry_from_iprep_blacklist.py {{ hostvars[item].host }} {{ hostvars[item].vdom }} {{ hostvars[item].username }} \"{{ hostvars[item].password }}\" {{ ipify_public_ip }}/32"
+    args:
+      chdir: "{{ playbook_dir }}"
+    when: "is_ha_master[item]"
+    with_items: "{{ groups['adc'] }}"
+    register: attack_result
+    ignore_errors: yes
+
+  # - debug:
+  #     msg: "{{ item }}"
+  #   loop: "{{ targets_attacks }}"
+
+  # wait for alerts events to appear
+  - pause:
+      seconds: 10
+
+  # check existing logs
+  - name: Get logs
+    fortiadcmonitor:
+     action: "logs"
+     log_search_filter: |
+            [{"property":"src","operator":"equals","value":{"exclude":"0","val1":"{{ ipify_public_ip }}"}},
+             {"property":"date","operator":"between","value":{"exclude":"0","val1":"{{ date }}","val2":"{{ date }}"}},
+             {"property":"time","operator":"between","value":{"exclude":"0","val1":"{{ time_from }}","val2":"{{ time_to }}"}}
+            ]
+     log_type: "attack"
+     log_subtype: "ip_reputation"
+     host:  "{{ hostvars[ha_master_adc]['host'] }}"
+     username: "{{ hostvars[ha_master_adc]['username'] }}"
+     password: "{{ hostvars[ha_master_adc]['password'] }}"
+     vdom: "{{ hostvars[ha_master_adc]['vdom'] }}"
+    register: log_info
+    vars:
+      ha_master_adc: "{{ ha_master_map[item.0.adc] }}"
+    loop: "{{ targets_attacks }}"
+
+  - debug:
+      msg: "{{ log_info.results }}"
+
+  - set_fact:
+      attacks_detected_count: "{{ attacks_detected_count | int + item.meta.output.data.payload | length  }}"
+    loop: "{{ log_info.results }}"
+
+  - debug:
+      msg: "Attack(s) detected {{ attacks_detected_count }}"
+
+  - name: "Check if all attacks detected (if each search returned 1 result)"
+    set_fact:
+      reputation_inconsistency: "{{ reputation_inconsistency + [ 'Attack ' + item.item.1.name + ' @ ' + item.item.0.ip + ':' + item.item.0.port | string + ' undetected!' ]}}"
+    when: "item.meta.output.data.payload | length < 1"
+    loop: "{{ log_info.results }}"
+
+  - name: "Check if all attacks detected (by total count)"
+    set_fact:
+      reputation_inconsistency: "{{ reputation_inconsistency + [ 'Attacks planned (made) ' + attacks_planned_count + ' does not match detected ' + attacks_detected_count ]}}"
+    when: "attacks_detected_count | int < attacks_planned_count | int"
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'IP reputation ok' if (reputation_inconsistency | length) == 0 else reputation_inconsistency}}"

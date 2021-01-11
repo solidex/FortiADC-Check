@@ -1,0 +1,94 @@
+
+- hosts: ha_unit_1, adc
+
+  gather_facts: no
+  vars:
+    ha_inconsistency: []
+    ha_warn: []
+  tasks:
+
+  - name: Get HA status - 1st unit
+    delegate_to: localhost
+    fortiadcmonitor:
+     action: "system ha status"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+    register: system_ha_unit_1_info
+
+  - name: Get HA status - 2nd unit
+    delegate_to: localhost
+    fortiadcmonitor:
+     action: "system ha status"
+     host:  "{{ hostvars[ha.peer]['host'] }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+    register: system_ha_peer_info
+
+  # - debug:
+  #     msg: "{{ system_ha_peer_info }}"
+  #
+  #
+  # - debug:
+  #     msg: "{{ system_ha_unit_1_info }}"
+
+  - name: "Check HA slave is there"
+    set_fact:
+      ha_inconsistency: "{{ ha_inconsistency + [ inventory_hostname + ': Slave is missing, M ' + inventory_hostname + ', S ' + hostvars[ha.peer]['inventory_hostname'] ]}}"
+    when: "system_ha_unit_1_info['meta']['output']['payload']['peers'] | length < 1"
+
+  - name: "Check HA master is there"
+    set_fact:
+      ha_inconsistency: "{{ ha_inconsistency + [ hostvars[ha.peer]['inventory_hostname'] + ': Master is missing, M ' + inventory_hostname + ', S ' + hostvars[ha.peer]['inventory_hostname'] ]}}"
+    when: "system_ha_peer_info['meta']['output']['payload']['peers'] | length < 1"
+
+
+
+  - name: "Check HA state from 1st unit"
+    set_fact:
+      ha_inconsistency: "{{ ha_inconsistency + [ inventory_hostname + ': Local state is invalid, state is ' + system_ha_unit_1_info['meta']['output']['payload']['local_state'] ]}}"
+    when: "system_ha_unit_1_info['meta']['output']['payload']['local_state'] not in ['Primary', 'Secondary']"
+
+  - name: "Check HA master from 2nd unit"
+    set_fact:
+      ha_inconsistency: "{{ ha_inconsistency + [ hostvars[ha.peer]['inventory_hostname'] + ': Local state is invalid, state is ' + system_ha_peer_info['meta']['output']['payload']['local_state'] ]}}"
+    when: "system_ha_peer_info['meta']['output']['payload']['local_state'] not in ['Primary', 'Secondary']"
+
+
+
+  - name: "Check for dual-master or dual-slave state"
+    set_fact:
+      ha_inconsistency: "{{ ha_inconsistency + [ inventory_hostname + ': Both HA unit have same state ' + system_ha_unit_1_info['meta']['output']['payload']['local_state'] ]}}"
+    when: "system_ha_unit_1_info['meta']['output']['payload']['local_state'] == system_ha_peer_info['meta']['output']['payload']['local_state']"
+
+
+
+  - name: "Check HA config sync from 1st unit"
+    set_fact:
+      ha_inconsistency: "{{ ha_inconsistency + [ inventory_hostname + ': config sync state is invalid, state is ' + system_ha_unit_1_info['meta']['output']['payload']['cfg_sync_state'] ]}}"
+    when: "system_ha_unit_1_info['meta']['output']['payload']['cfg_sync_state'] != 'In Sync'"
+
+  - name: "Check HA config sync from 2nd unit"
+    set_fact:
+      ha_inconsistency: "{{ ha_inconsistency + [ hostvars[ha.peer]['inventory_hostname'] + ': config sync state is invalid, state is ' + system_ha_peer_info['meta']['output']['payload']['cfg_sync_state'] ]}}"
+    when: "system_ha_peer_info['meta']['output']['payload']['cfg_sync_state'] != 'In Sync'"
+
+
+  - name: "Monitor interface check from 1st unit"
+    set_fact:
+      ha_warn: "{{ ha_warn + [ inventory_hostname + ': some intf are down ' + system_ha_unit_1_info['meta']['output']['payload']['ha-link-status']['down-list'] | string ]}}"
+    when: "system_ha_unit_1_info['meta']['output']['payload']['ha-link-status']['down-list'] | default([]) | length != 0"
+
+  - name: "Monitor interface check from 2nd unit"
+    set_fact:
+      ha_warn: "{{ ha_warn + [ hostvars[ha.peer]['inventory_hostname'] + ': some intf are down ' + system_ha_peer_info['meta']['output']['payload']['ha-link-status']['down-list'] | string ]}}"
+    when: "system_ha_peer_info['meta']['output']['payload']['ha-link-status']['down-list'] | default([]) | length != 0"
+
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'HA ok' if (ha_inconsistency | length) == 0 else ha_inconsistency }}"
+
+  - name: Warnings
+    debug:
+       msg: "{{ 'No warnings' if (ha_warn | length) == 0 else ha_warn }}"

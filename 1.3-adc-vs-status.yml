@@ -1,0 +1,49 @@
+
+- hosts: adc
+
+  gather_facts: no
+  vars:
+    health_inconsistency: []
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortiadcmonitor:
+     action: "system ha status"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+    register: system_ha_info
+
+  - set_fact:
+      is_ha_master: "{{ system_ha_info['meta']['output']['payload']['local_state'] == 'Primary' }}"
+
+  - name: Get SLB VS status
+    delegate_to: localhost
+    fortiadcmonitor:
+     action: "slb all_vs_info"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     vdom: "{{ vdom }}"
+    register: slb_vs_status_info
+    when: is_ha_master
+
+  # - debug:
+  #     msg: "{{ slb_vs_status_info['meta']['output'] | json_query('payload[?config.availability!=`HEALTHY`]') }}"
+
+  - set_fact:
+      unhealthy_vs: "{{ slb_vs_status_info['meta']['output'] | json_query('payload[?config.availability!=`HEALTHY`]') }}"
+    when: is_ha_master
+
+  - name: "Check if VS are healthy"
+    set_fact:
+      health_inconsistency: "{{ health_inconsistency + [ inventory_hostname + ': unhealthy VS ' + item.config.mkey + ' is in status ' + item.config.availability ]}}"
+    when:
+      - is_ha_master
+    loop: "{{ unhealthy_vs }}"
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'VS ok' if (health_inconsistency | length) == 0 else health_inconsistency}}"
+    when: is_ha_master

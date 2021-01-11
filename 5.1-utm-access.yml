@@ -1,0 +1,44 @@
+
+- hosts: utm
+
+  gather_facts: no
+  vars:
+    acc_inconsistency: []
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortios_facts:
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     gather_subset:
+        - fact: 'system_ha-checksums_select'
+    register: fortios_ha_info
+
+  - set_fact:
+      is_ha_master: "{{ ( ansible_facts.network_resources['system_ha-checksums_select'] | json_query('results[?is_manage_master==`1`].serial_no | [0]') ) == ansible_facts.network_resources['system_ha-checksums_select']['serial'] }}"
+
+  - name: "Scanning ports from this host"
+    delegate_to: localhost
+    shell: nmap {{ ip[item].address | ipaddr('address') }} -p22,23,80,443,541 --open | grep open
+    register: acc_status
+    when: is_ha_master
+    with_items: "{{ ip }}"
+    changed_when: no
+    failed_when: no
+
+  - name: "Check if scan found no open ports"
+    set_fact:
+      acc_inconsistency: "{{ acc_inconsistency + [ inventory_hostname + ': ' + item.item + ' from LOCALHOST check failed: ' + item.stdout ]}}"
+    when:
+      - 'item.stdout != ""'
+      - is_ha_master
+    loop: "{{ acc_status.results }}"
+
+  # Printing results
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'Access ok' if (acc_inconsistency | length) == 0 else acc_inconsistency}}"
+    when:
+      - is_ha_master

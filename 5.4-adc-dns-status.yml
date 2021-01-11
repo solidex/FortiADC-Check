@@ -1,0 +1,46 @@
+
+- hosts: adc
+
+  gather_facts: no
+  vars:
+    dns_inconsistency: []
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortiadcmonitor:
+     action: "system ha status"
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+    register: system_ha_info
+
+  - set_fact:
+      is_ha_master: "{{ system_ha_info['meta']['output']['payload']['local_state'] == 'Primary' }}"
+
+  - name: Exec nslookup
+    delegate_to: localhost
+    fortiadcmonitor:
+      host:  "{{ host }}"
+      username: "{{ username }}"
+      password: "{{ password }}"
+      vdom: "data"
+      method: "ssh"
+      commands: "exec nslookup name update.fortiguard.net"
+    register: exec_nslookup_info
+    when: is_ha_master
+
+  # - debug:
+  #     msg: "{{ exec_nslookup_info }}"
+
+  - name: "Check DNS operation"
+    set_fact:
+      dns_inconsistency: "{{ dns_inconsistency + [ inventory_hostname + ': exec nslookup failed - ' + exec_nslookup_info.meta.out ]}}"
+    when:
+      - '"Non-authoritative answer" not in exec_nslookup_info.meta.out | default("")'
+      - is_ha_master
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'DNS ok' if (dns_inconsistency | length) == 0 else dns_inconsistency}}"
+    when: is_ha_master

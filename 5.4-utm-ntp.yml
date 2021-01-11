@@ -1,0 +1,99 @@
+
+- hosts: utm
+
+  gather_facts: no
+  vars:
+    ntp_inconsistency: []
+  tasks:
+
+  - name: Get HA status
+    delegate_to: localhost
+    fortios_facts:
+     host:  "{{ host }}"
+     username: "{{ username }}"
+     password: "{{ password }}"
+     gather_subset:
+        - fact: 'system_ha-checksums_select'
+    register: fortios_ha_info
+
+  - set_fact:
+      is_ha_master: "{{ ( ansible_facts.network_resources['system_ha-checksums_select'] | json_query('results[?is_manage_master==`1`].serial_no | [0]') ) == ansible_facts.network_resources['system_ha-checksums_select']['serial'] }}"
+
+  - name: "Get timezone"
+    delegate_to: localhost
+    fortiosconfig:
+     config: "system global"
+     action: "get"
+     host:  "{{  host }}"
+     username: "{{  username }}"
+     password: "{{ password }}"
+     https: True
+     ssl_verify: False
+    register: tz_info
+    when: is_ha_master
+
+  - name: "Check TZ"
+    set_fact:
+      ntp_inconsistency: "{{ ntp_inconsistency + [ inventory_hostname + ': TZ is not configured properly' ]}}"
+    when:
+      - 'tz_info.meta.results.timezone | int != 84'
+      - is_ha_master
+
+  - name: "Get NTP config"
+    delegate_to: localhost
+    fortiosconfig:
+     config: "system ntp"
+     action: "get"
+     host:  "{{ host }}"
+     username: "{{  username }}"
+     password: "{{ password }}"
+     https: True
+     ssl_verify: False
+    register: ntp_info
+    when: is_ha_master
+
+  - name: "Check NTP config"
+    set_fact:
+      ntp_inconsistency: "{{ ntp_inconsistency + [ inventory_hostname + ': NTP servers are not configured properly! Server ' + item + ' expected but not configured.' ]}}"
+    when:
+      - 'ntp_info.meta.results.ntpserver | json_query(qry) == []'
+      - is_ha_master
+    vars:
+      qry: "[?server=='{{ item }}']"
+    with_items: "{{ ntp }}"
+
+  - name: "NTP"
+    delegate_to: localhost
+    fortiosconfig:
+     action: "ssh"
+     host:  "{{  host }}"
+     username: "{{  username }}"
+     password: "{{ password }}"
+     https: True
+     commands: |
+               {% if vdom_mode %}
+               config global
+               {% endif %}
+               diag sys ntp status
+
+    register: ntp_status
+    when: is_ha_master
+
+  - name: "Check if ntp sync enabled"
+    set_fact:
+      ntp_inconsistency: "{{ ntp_inconsistency + [ inventory_hostname + ': ntp sync not enabled' ]}}"
+    when:
+      - '"ntpsync: enabled" not in ntp_status.meta.out'
+      - is_ha_master
+
+  - name: "Check if ntp syncronized"
+    set_fact:
+      ntp_inconsistency: "{{ ntp_inconsistency + [ inventory_hostname + ': ntp not syncronized' ]}}"
+    when:
+      - '"synchronized: yes" not in ntp_status.meta.out'
+      - is_ha_master
+
+  - name: Analyze and print result
+    debug:
+       msg: "{{ 'NTP ok' if (ntp_inconsistency | length) == 0 else ntp_inconsistency }}"
+    when: is_ha_master
